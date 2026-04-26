@@ -23,6 +23,13 @@ body { font-family: -apple-system, 'Hiragino Sans', 'Meiryo', sans-serif; }
 }
 .area-btn:hover { background: #f0f0f0; }
 .area-btn.active { background: #333; color: #fff; border-color: #333; }
+/* 現在地ボタン */
+.loc-btn {
+  background: #f0f7ff; border-color: #2266CC; color: #2266CC; font-weight: 600;
+}
+.loc-btn:hover { background: #dceaff; }
+.loc-btn:disabled { opacity: 0.55; cursor: wait; }
+
 #map { width: 100%; height: calc(100vh - 52px); }
 .spot-popup { font-family: -apple-system, 'Hiragino Sans', sans-serif; min-width: 180px; }
 .spot-popup h3 { font-size: 14px; font-weight: 700; color: #333; margin-bottom: 4px; }
@@ -30,6 +37,23 @@ body { font-family: -apple-system, 'Hiragino Sans', 'Meiryo', sans-serif; }
 .spot-popup .area-tag {
   display: inline-block; font-size: 10px; padding: 2px 8px;
   border-radius: 10px; background: #f0f0f0; color: #555; margin-top: 6px;
+}
+/* redピンのポップアップを少し目立たせる */
+.leaflet-popup.red-popup .leaflet-popup-content-wrapper {
+  border: 2px solid #D42A2A;
+  box-shadow: 0 3px 14px rgba(212, 42, 42, 0.25);
+}
+/* 現在地マーカーのパルスアニメーション */
+.loc-pulse {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #1E88E5; border: 3px solid #fff;
+  box-shadow: 0 0 0 0 rgba(30, 136, 229, 0.5);
+  animation: locPulse 1.8s infinite;
+}
+@keyframes locPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0.5); }
+  70%  { box-shadow: 0 0 0 14px rgba(30, 136, 229, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0); }
 }
 </style>
 </head>
@@ -47,17 +71,44 @@ var SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKcb2FDhdLxpsl
 // ============================================================
 // 列構成（1行目ヘッダー必須）:
 // name / lat / lng / area / color / description
-// color: red=コラボ / blue=観光 / black=その他
+// color: red / blue / purple / black / white
+//   - red のみ大サイズ＋ポップアップ常時表示
 // ============================================================
 
-var PIN_COLORS = { red: "#D42A2A", black: "#333333", blue: "#2266CC" };
+var PIN_COLORS = {
+  red:    "#D42A2A",
+  blue:   "#2266CC",
+  purple: "#8B3FBF",
+  black:  "#333333",
+  white:  "#FFFFFF"
+};
 
 function makeIcon(color) {
-  var hex = PIN_COLORS[color] || PIN_COLORS.black;
-  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="25" height="41" viewBox="0 0 25 41">'
-    + '<path d="M12.5 0C5.6 0 0 5.6 0 12.5C0 21.9 12.5 41 12.5 41S25 21.9 25 12.5C25 5.6 19.4 0 12.5 0Z" fill="' + hex + '"/>'
-    + '<circle cx="12.5" cy="12.5" r="5" fill="#fff"/></svg>';
-  return L.divIcon({ html: svg, iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [0, -35], className: "" });
+  var c = (color || "black").trim().toLowerCase();
+  var hex = PIN_COLORS[c] || PIN_COLORS.black;
+  var isRed = (c === "red");
+  var isWhite = (c === "white");
+
+  // redのみ拡大
+  var w = isRed ? 36 : 25;
+  var h = isRed ? 59 : 41;
+
+  // white は視認性のため縁取り＋中心ドット濃色化
+  var stroke = isWhite ? "#333" : "none";
+  var strokeW = isWhite ? 1.5 : 0;
+  var dot = isWhite ? "#333" : "#fff";
+
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 25 41">'
+    + '<path d="M12.5 0C5.6 0 0 5.6 0 12.5C0 21.9 12.5 41 12.5 41S25 21.9 25 12.5C25 5.6 19.4 0 12.5 0Z" fill="' + hex + '" stroke="' + stroke + '" stroke-width="' + strokeW + '"/>'
+    + '<circle cx="12.5" cy="12.5" r="5" fill="' + dot + '"/></svg>';
+
+  return L.divIcon({
+    html: svg,
+    iconSize: [w, h],
+    iconAnchor: [Math.round(w / 2), h],
+    popupAnchor: [0, -h + 6],
+    className: ""
+  });
 }
 
 var areas = [
@@ -74,7 +125,7 @@ var areas = [
   { name: "新小岩", lat: 35.7170, lng: 139.8520, zoom: 16 }
 ];
 
-var map = L.map("map").setView([areas[0].lat, areas[0].lng], areas[0].zoom);
+var map = L.map("map", { closePopupOnClick: false }).setView([areas[0].lat, areas[0].lng], areas[0].zoom);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   attribution: "&copy; OpenStreetMap contributors", maxZoom: 19
 }).addTo(map);
@@ -82,12 +133,82 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 var allMarkers = [];
 var container = document.getElementById("areaBtns");
 
+// ----------------------------------------------------------------
+// 現在地ボタン（エリアボタンの先頭に固定配置）
+// ----------------------------------------------------------------
+var locBtn = document.createElement("button");
+locBtn.className = "area-btn loc-btn";
+locBtn.innerHTML = "📍 現在地";
+locBtn.onclick = function() {
+  if (!navigator.geolocation) {
+    alert("お使いのブラウザは位置情報に対応していません。");
+    return;
+  }
+  locBtn.disabled = true;
+  locBtn.innerHTML = "取得中…";
+  map.locate({
+    setView: true,
+    maxZoom: 16,
+    enableHighAccuracy: true,
+    timeout: 10000,
+    maximumAge: 0
+  });
+};
+container.appendChild(locBtn);
+
+// 現在地マーカー＆精度円（再取得時は置き換え）
+var locMarker = null;
+var locCircle = null;
+
+map.on("locationfound", function(e) {
+  if (locMarker) map.removeLayer(locMarker);
+  if (locCircle) map.removeLayer(locCircle);
+
+  // パルスする現在地ドット
+  var pulseIcon = L.divIcon({
+    html: '<div class="loc-pulse"></div>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+    className: ""
+  });
+  locMarker = L.marker(e.latlng, { icon: pulseIcon, interactive: true })
+    .addTo(map)
+    .bindPopup("現在地（誤差 約" + Math.round(e.accuracy) + "m）");
+
+  // 精度円
+  locCircle = L.circle(e.latlng, {
+    radius: e.accuracy,
+    color: "#1E88E5",
+    weight: 1,
+    fillColor: "#1E88E5",
+    fillOpacity: 0.08
+  }).addTo(map);
+
+  locBtn.disabled = false;
+  locBtn.innerHTML = "📍 現在地";
+});
+
+map.on("locationerror", function(e) {
+  locBtn.disabled = false;
+  locBtn.innerHTML = "📍 現在地";
+  var msg = "位置情報を取得できませんでした。";
+  if (e.code === 1) msg = "位置情報の利用が拒否されています。ブラウザの設定をご確認ください。";
+  else if (e.code === 2) msg = "現在地を特定できませんでした。電波状況をご確認ください。";
+  else if (e.code === 3) msg = "位置情報の取得がタイムアウトしました。もう一度お試しください。";
+  alert(msg);
+});
+
+// ----------------------------------------------------------------
+// エリア切替ボタン
+// ----------------------------------------------------------------
 areas.forEach(function(a, i) {
   var btn = document.createElement("button");
   btn.className = "area-btn" + (i === 0 ? " active" : "");
   btn.textContent = a.name;
   btn.onclick = function() {
-    document.querySelectorAll(".area-btn").forEach(function(b) { b.className = "area-btn"; });
+    document.querySelectorAll(".area-btn").forEach(function(b) {
+      if (!b.classList.contains("loc-btn")) b.className = "area-btn";
+    });
     btn.className = "area-btn active";
     map.flyTo([a.lat, a.lng], a.zoom, { duration: 0.8 });
     filterMarkers(a.name);
@@ -99,6 +220,10 @@ function filterMarkers(areaName) {
   allMarkers.forEach(function(m) {
     if (areaName === "全エリア" || m.area === areaName) {
       map.addLayer(m.marker);
+      // red は常時ポップアップを開いた状態に戻す
+      if (m.color === "red") {
+        m.marker.openPopup();
+      }
     } else {
       map.removeLayer(m.marker);
     }
@@ -106,13 +231,27 @@ function filterMarkers(areaName) {
 }
 
 function addMarker(name, lat, lng, area, color, desc) {
-  var marker = L.marker([lat, lng], { icon: makeIcon(color) });
+  var c = (color || "black").trim().toLowerCase();
+  var marker = L.marker([lat, lng], { icon: makeIcon(c) });
+
+  // red のポップアップは autoClose:false / closeOnClick:false で開きっぱなしを維持
+  var popupOpts = (c === "red")
+    ? { autoClose: false, closeOnClick: false, autoPan: false, className: "red-popup" }
+    : {};
+
   marker.bindPopup(
     '<div class="spot-popup"><h3>' + name + '</h3><p>' + desc + '</p>'
-    + (area ? '<span class="area-tag">' + area + '</span>' : '') + '</div>'
+    + (area ? '<span class="area-tag">' + area + '</span>' : '') + '</div>',
+    popupOpts
   );
   marker.addTo(map);
-  allMarkers.push({ marker: marker, area: area });
+
+  // red はデフォルトで開いた状態にする
+  if (c === "red") {
+    marker.openPopup();
+  }
+
+  allMarkers.push({ marker: marker, area: area, color: c });
 }
 
 Papa.parse(SHEET_URL, {
